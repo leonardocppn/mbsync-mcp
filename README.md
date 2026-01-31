@@ -13,8 +13,9 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that p
 
 ## Requirements
 
+- **Linux** or **macOS** (Windows not supported, unless using WSL)
 - Python 3.10+
-- [mbsync](https://isstracker.github.io/mbsync/) configured with `~/.mbsyncrc`
+- [mbsync](https://isync.sourceforge.io/) configured with `~/.mbsyncrc`
 - [mcp](https://pypi.org/project/mcp/) >= 1.0.0
 - [keyring](https://pypi.org/project/keyring/) (optional, for IMAP write operations)
 
