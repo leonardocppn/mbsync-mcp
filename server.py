@@ -409,6 +409,20 @@ def get_sorted_uids(mail: imaplib.IMAP4_SSL, folder: str) -> list[str]:
     return []
 
 
+def fetch_subject(mail: imaplib.IMAP4_SSL, uid: str) -> str:
+    """Read the subject of a UID, empty string if not retrievable."""
+    try:
+        _, data = mail.uid('FETCH', uid, '(BODY.PEEK[HEADER.FIELDS (SUBJECT)])')
+        if data and data[0] and len(data[0]) > 1:
+            raw = data[0][1]
+            if isinstance(raw, bytes):
+                raw = raw.decode('utf-8', errors='replace')
+            return raw.replace('\r\n', ' ').replace('\n', ' ')[:60]
+    except:
+        pass
+    return ""
+
+
 def get_uid_by_index(mail: imaplib.IMAP4_SSL, folder: str, index: int) -> tuple[str, str] | None:
     """Get UID and subject by index (0 = most recent)."""
     uids = get_sorted_uids(mail, folder)
@@ -416,17 +430,7 @@ def get_uid_by_index(mail: imaplib.IMAP4_SSL, folder: str, index: int) -> tuple[
         return None
 
     uid = uids[index]
-    subject = ""
-    try:
-        _, data = mail.uid('FETCH', uid, '(BODY.PEEK[HEADER.FIELDS (SUBJECT)])')
-        if data and data[0] and len(data[0]) > 1:
-            raw = data[0][1]
-            if isinstance(raw, bytes):
-                raw = raw.decode('utf-8', errors='replace')
-            subject = raw.replace('\r\n', ' ').replace('\n', ' ')[:60]
-    except:
-        pass
-    return uid, subject
+    return uid, fetch_subject(mail, uid)
 
 
 # =============================================================================
@@ -446,6 +450,19 @@ def sync_account(account_name: str, timeout: int = 300) -> dict:
         return {"success": False, "error": "mbsync not found"}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+def sync_after_write(account: dict) -> str:
+    """Realign the local maildir after an IMAP write.
+
+    Writes go through IMAP, reads through the local maildir: without this,
+    later reads still show the state from before the write.
+    Returns a warning to append to the message, empty if the sync succeeded.
+    """
+    name = account.get('name')
+    if name and sync_account(name, timeout=120).get('success'):
+        return ""
+    return " ⚠️ local maildir not resynced: re-read after sync_account"
 
 
 def imap_move(mail: imaplib.IMAP4_SSL, folder: str, uid: str, dest: str) -> bool:
@@ -539,20 +556,23 @@ def cleanup_batch(account: dict, folder: str, delete_idxs: list, archive_idxs: l
         special = find_special_folders(mail, account.get('host', ''))
 
         uid_map = {i: uids[i] for i in all_idxs if i < len(uids)}
-        deleted = archived = 0
+        # Subjects must be read before the MOVE: afterwards the UID is gone from the folder
+        subjects = {i: fetch_subject(mail, uid) for i, uid in uid_map.items()}
+        deleted = []
+        archived = []
         errors = []
 
         for idx in delete_idxs:
             if idx in uid_map:
                 if imap_move(mail, folder, uid_map[idx], special['trash']):
-                    deleted += 1
+                    deleted.append(subjects.get(idx, ""))
                 else:
                     errors.append(f"Delete [{idx}] failed")
 
         for idx in archive_idxs:
             if idx in uid_map:
                 if imap_move(mail, folder, uid_map[idx], special['all_mail']):
-                    archived += 1
+                    archived.append(subjects.get(idx, ""))
                 else:
                     errors.append(f"Archive [{idx}] failed")
 
@@ -946,7 +966,9 @@ def handle_move_email(args):
         return "Account not found"
 
     result = move_email_by_index(acc, args.get("source_folder", "INBOX"), args.get("dest_folder", ""), args.get("index", 0))
-    return f"✅ {result['message']}" if result.get('success') else f"❌ {result.get('error')}"
+    if result.get('success'):
+        return f"✅ {result['message']}{sync_after_write(acc)}"
+    return f"❌ {result.get('error')}"
 
 
 @tool("delete_email")
@@ -956,7 +978,9 @@ def handle_delete_email(args):
         return "Account not found"
 
     result = delete_email_by_index(acc, args.get("folder", "INBOX"), args.get("index", 0))
-    return "🗑️ Email moved to trash" if result.get('success') else f"❌ {result.get('error')}"
+    if result.get('success'):
+        return f"🗑️ {result['message']}{sync_after_write(acc)}"
+    return f"❌ {result.get('error')}"
 
 
 @tool("archive_email")
@@ -966,7 +990,9 @@ def handle_archive_email(args):
         return "Account not found"
 
     result = archive_email_by_index(acc, args.get("folder", "INBOX"), args.get("index", 0))
-    return "📦 Email archived" if result.get('success') else f"❌ {result.get('error')}"
+    if result.get('success'):
+        return f"📦 {result['message']}{sync_after_write(acc)}"
+    return f"❌ {result.get('error')}"
 
 
 @tool("cleanup_batch")
@@ -985,11 +1011,19 @@ def handle_cleanup_batch(args):
     if "error" in result:
         return f"❌ {result['error']}"
 
-    lines = [
-        "Operations completed:",
-        f"🗑️ Deleted: {result.get('deleted', 0)}",
-        f"📦 Archived: {result.get('archived', 0)}"
-    ]
+    deleted = result.get('deleted', [])
+    archived = result.get('archived', [])
+
+    lines = ["Operations completed:", f"🗑️ Deleted: {len(deleted)}"]
+    lines.extend(f"  • {s}" for s in deleted)
+    lines.append(f"📦 Archived: {len(archived)}")
+    lines.extend(f"  • {s}" for s in archived)
+
+    if deleted or archived:
+        warning = sync_after_write(acc)
+        if warning:
+            lines.append(warning.strip())
+
     if result.get('errors'):
         lines.append(f"\n⚠️ Errors: {len(result['errors'])}")
         for err in result['errors'][:5]:

@@ -1,40 +1,27 @@
 # mbsync-mcp
 
-A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that provides email access via [mbsync](https://isstracker.github.io/mbsync/) and Maildir.
+A [Model Context Protocol](https://modelcontextprotocol.io/) server that gives an AI assistant access to the mail [mbsync](https://isync.sourceforge.io/) already keeps on your disk.
 
-## Features
+Reading happens entirely on the local Maildir, so it works offline and sends nothing over the network. Moving, archiving and deleting go out over IMAP, because that is where the mailbox actually lives; after a write succeeds the server runs mbsync for that account, so the local copy catches up on its own.
 
-- **Read emails** from Maildir folders synchronized with mbsync
-- **Search** by sender, subject, or body content
-- **Filter** by date range and read/unread status
-- **IMAP operations**: move, delete, archive emails
-- **Batch cleanup**: delete/archive multiple emails at once
-- **Daily briefing**: inbox summary with top senders
+Accounts, hosts and Maildir paths are read from `~/.mbsyncrc`. The server keeps no configuration of its own, and reading your mail requires no password.
 
 ## Requirements
 
-- **Linux** or **macOS** (Windows not supported, unless using WSL)
-- Python 3.10+
-- [mbsync](https://isync.sourceforge.io/) configured with `~/.mbsyncrc`
-- [mcp](https://pypi.org/project/mcp/) >= 1.0.0
-- [keyring](https://pypi.org/project/keyring/) (optional, for IMAP write operations)
+Linux or macOS (on Windows, only under WSL), Python 3.10 or later, mbsync installed and configured, `mcp>=1.0.0`, plus `keyring` if you want the write tools.
 
 ## Installation
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/mbsync-mcp.git
+git clone https://github.com/leonardocppn/mbsync-mcp.git
 cd mbsync-mcp
-
-# Install dependencies
 pip install -r requirements.txt
 ```
 
 ## Configuration
 
-The server reads email configuration from `~/.mbsyncrc`. Make sure mbsync is properly configured and your emails are synchronized.
+The server parses `~/.mbsyncrc` to discover your accounts, so whatever mbsync syncs is already visible to it. A minimal account looks like this:
 
-Example `~/.mbsyncrc` structure:
 ```
 IMAPAccount myaccount
 Host imap.gmail.com
@@ -57,20 +44,9 @@ Create Both
 SyncState *
 ```
 
-### IMAP Write Operations
+Every tool takes the account as either the channel name or the address, and a substring of either one is enough. Nested folders are listed as `parent/child`.
 
-To enable move/delete/archive operations, store your IMAP password:
-
-```bash
-# Using keyring
-python -c "import keyring; keyring.set_password('mbsync-mcp', 'user@gmail.com', 'your-app-password')"
-```
-
-For Gmail, use an [App Password](https://support.google.com/accounts/answer/185833).
-
-## Usage with Claude Code
-
-Add to your MCP configuration (e.g., `~/.config/claude/mcp.json`):
+Then point your MCP client at `server.py`. In Claude Code that is an entry in the project's `.mcp.json`:
 
 ```json
 {
@@ -83,39 +59,63 @@ Add to your MCP configuration (e.g., `~/.config/claude/mcp.json`):
 }
 ```
 
-## Available Tools
+Restart the client after editing the file.
 
-### Read Operations
-- `list_accounts` - List configured email accounts
-- `list_folders` - List folders in an account
-- `count_emails` - Count emails in a folder
-- `get_emails` - Get emails with filters (date, read status)
-- `get_unread_emails` - Get unread emails
-- `get_email_details` - Get full email content
-- `search_emails` - Search by sender/subject/body
-- `get_inbox_summary` - Inbox statistics
-- `daily_briefing` - Daily email summary
+### Credentials for the write tools
 
-### Write Operations (require IMAP credentials)
-- `sync_account` - Sync via mbsync
-- `move_email` - Move email between folders
-- `delete_email` - Move email to trash
-- `archive_email` - Archive email
-- `cleanup_batch` - Batch delete/archive
-
-## Running Tests
+Reading needs no credentials. The write tools open an IMAP connection, and the password is looked up first in the system keyring, under the service name `mbsync-mcp`:
 
 ```bash
-cd mbsync-mcp
-python test_simple.py
+python -c "import keyring; keyring.set_password('mbsync-mcp', 'user@gmail.com', 'app-password')"
 ```
 
-## Debug Mode
+With no keyring entry the server falls back to the `PassCmd` of that account in `~/.mbsyncrc` and runs it. For Gmail the password to store is an [app password](https://support.google.com/accounts/answer/185833), not the one you log in with.
 
-Enable debug output:
+## Tools
+
+Reading, on the local Maildir:
+
+- `list_accounts`: accounts found in `~/.mbsyncrc`
+- `list_folders`: folders of an account, nested ones included
+- `count_emails`: total and unread count for a folder
+- `get_emails`: messages filtered by date range and read status, optionally syncing first
+- `get_unread_emails`: the unread ones, newest first
+- `get_email_details`: headers, body and list of attachments of one message
+- `search_emails`: search over sender, subject, body, or all three
+- `get_inbox_summary`: counts and the senders you hear from most
+- `daily_briefing`: one day of mail, counted and listed
+
+Writing, over IMAP:
+
+- `sync_account`: runs mbsync for one account, with a timeout
+- `move_email`: moves a message between two folders
+- `archive_email`: moves it to the account's archive folder, as the server names it
+- `delete_email`: moves it to trash, likewise
+- `cleanup_batch`: several deletions and archivings over a single connection
+
+## Resources
+
+Two MCP resources expose the configuration as JSON: `mbsync://accounts` for the account list, and `mbsync://account/<name>/folders` for the folders of each one.
+
+## How messages are addressed
+
+A message is identified by its position in a listing, `0` being the most recent. Reading orders the local Maildir by file time, while the write tools reopen the folder over IMAP and order it by message date. The two agree as long as the local copy is current, so run `sync_account` or re-read the folder before acting on an index that comes from an old listing.
+
+## Smoke test
+
+`test_simple.py` runs against the accounts your own `~/.mbsyncrc` declares: it parses the configuration, resolves each account by channel name and by address, and counts the messages in the folders it finds. It opens no IMAP connection and writes nothing.
+
 ```bash
-MBSYNC_DEBUG=1 python server.py
+python3 test_simple.py
 ```
+
+## Debug
+
+```bash
+MBSYNC_DEBUG=1 python3 server.py
+```
+
+Debug lines go to standard output, which is also the channel the MCP client talks on, so use this while running the server by hand.
 
 ## License
 
