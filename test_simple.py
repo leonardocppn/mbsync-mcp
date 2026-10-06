@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Smoke test for the mbsync-mcp server.
 
-Runs against whatever ~/.mbsyncrc describes on this machine: it parses the
-configuration, resolves the accounts it finds, and reads their Maildir folders.
-Nothing is written, and no IMAP connection is opened.
+Runs against the accounts declared in ~/.mbsyncrc on this machine. It parses
+the configuration, resolves each account by name and by address, and counts
+the emails in the Maildir folders of each account, without writing anything
+or opening IMAP connections.
 """
 
 import sys
@@ -44,7 +45,7 @@ def test_config():
 
 
 def test_resolve():
-    """Resolve each account by channel name, by address, and by substring."""
+    """Resolve each account by channel name and by address, ignoring case, and check that partial names are rejected."""
     header("Account resolution")
 
     accounts = get_accounts()
@@ -56,18 +57,19 @@ def test_resolve():
     for acc in accounts:
         name = acc.get("name", "")
         email_addr = acc.get("email", "")
-        queries = [q for q in (name, email_addr, name[:4]) if q]
+        queries = [q for q in (name, email_addr, name.upper()) if q]
         for query in queries:
             resolved = resolve_account(query)
             found = resolved.get("email", "N/A") if resolved else "not found"
             print(f"\n  '{query}' -> {found}")
-            if not resolved:
+            if not resolved or resolved.get("email") != email_addr:
                 ok = False
 
-    unknown = "nonexistent-account-xyz"
-    if resolve_account(unknown) is not None:
-        print(f"\n  '{unknown}' resolved, but should not have")
-        ok = False
+    # A piece of a name or address could belong to another account, so it must not resolve
+    for query in ("nonexistent-account-xyz", accounts[0].get("name", "")[:-1], "@", ""):
+        if resolve_account(query) is not None:
+            print(f"\n  '{query}' resolved, but should not have")
+            ok = False
 
     return ok
 
@@ -95,7 +97,7 @@ def test_folders():
 
 
 def test_inbox():
-    """Read the INBOX of every account."""
+    """Count the emails in the INBOX of each account."""
     header("INBOX")
 
     accounts = get_accounts()
